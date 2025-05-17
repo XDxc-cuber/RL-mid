@@ -61,7 +61,7 @@ def get_features(data: OurData):
     workers_history = [0. for i in range(history_dim)]
     workers_history_count = [-1 for i in range(history_dim)]
     
-    # last_state = None
+    last_state = None
     for k, e in enumerate(es):
         print("%d / %d"%(k, e_num), end='\r')
         w_id = str(e["worker_id"])
@@ -82,11 +82,11 @@ def get_features(data: OurData):
         state = torch.cat(state, 0).type_as(torch.zeros(1, dtype=torch.float16))
         
         # s1状态就是上一个s2状态
-        # if last_state is None:
-        #     last_state = state
-        #     continue
-        # requester_data['s1'].append(last_state)
-        # worker_data['s1'].append(last_state.clone())
+        if last_state is None:
+            last_state = state
+            continue
+        requester_data['s1'].append(last_state)
+        worker_data['s1'].append(last_state.clone())
         requester_data['s2'].append(state)
         worker_data['s2'].append(state.clone())
         last_state = state.clone()
@@ -96,9 +96,9 @@ def get_features(data: OurData):
         worker_data['a'].append(e["withdrawn"])
         worker_data['r'].append(e["withdrawn"] * p['total_awards'] / p['entry_count'])
 
-    # requester_data['s1'] = torch.stack(requester_data['s1'], dim=0)
+    requester_data['s1'] = torch.stack(requester_data['s1'], dim=0)
     requester_data['s2'] = torch.stack(requester_data['s2'], dim=0)
-    # worker_data['s1'] = torch.stack(worker_data['s1'], dim=0)
+    worker_data['s1'] = torch.stack(worker_data['s1'], dim=0)
     worker_data['s2'] = torch.stack(worker_data['s2'], dim=0)
     print()
 
