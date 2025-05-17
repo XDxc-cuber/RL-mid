@@ -1,4 +1,5 @@
 from load_datas import Dataloader
+from feature import get_features
 
 
 
@@ -9,4 +10,8 @@ if __name__ == "__main__":
 
     train_data, valid_data, test_data = dataloader.get_datas()
 
-    print(len(train_data.entrys), len(valid_data.entrys), len(test_data.entrys))
+    train_r_data, train_w_data = get_features(train_data)
+    valid_r_data, valid_w_data = get_features(valid_data)
+    test_r_data, test_w_data = get_features(test_data)
+
+    

@@ -2,8 +2,7 @@ import json
 import random
 
 class OurData():
-    def __init__(self, workers: dict, projects: dict, entrys: list):
-        """
+    """
         注意：所有dict的key都是str
         
         workers: {key: worker_id, value: "worker_quality"}
@@ -19,14 +18,15 @@ class OurData():
             * start_date：开始时间 (int)
             * deadline：结束时间 (int)
 
-        entrys: 按照时间戳排序的dict，key为e_id，value：
+        entrys: 按照时间戳排序的list：
             * entry_id: entry的id (int)
             * project_id：所属的project id (int)
             * worker_id：完成这个任务的worker的id (int)
             * score：完成这个任务的worker得到的分数 (int)
             * entry_created_at：entry时间戳 (int)
             * withdrawn：是否拒绝 (int, 0和1)
-        """
+    """
+    def __init__(self, workers: dict, projects: dict, entrys: list):
         self.workers, self.projects, self.entrys = workers, projects, entrys
 
 
