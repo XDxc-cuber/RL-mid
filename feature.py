@@ -74,7 +74,11 @@ def get_features(data: OurData, print_size=False):
     # quality score withdrawn
     p_history = [[0. for i in range(p_dim)] for j in range(p_num)]
     
+<<<<<<< HEAD
     last_r_state, last_w_state = None, None
+=======
+    last_state = None
+>>>>>>> 05be04cb61c64d747b7e22ff92fea9278ed41a6c
     for k, e in enumerate(es):
         print(" %d / %d"%(k, e_num), end='\r')
         w_id = e["worker_id"]
@@ -92,6 +96,7 @@ def get_features(data: OurData, print_size=False):
         workers_history_count[w_id2index[w_id]][p['category']] += 1 if workers_history_count[w_id2index[w_id]] != -1 else 2
         
         # s1状态就是上一个s2状态
+<<<<<<< HEAD
         if last_r_state is None:
             last_r_state = state
             last_w_state = action
@@ -99,6 +104,13 @@ def get_features(data: OurData, print_size=False):
 
         requester_data['s1'].append(last_r_state)
         worker_data['s1'].append(last_w_state)
+=======
+        if last_state is None:
+            last_state = state
+            continue
+        requester_data['s1'].append(last_state)
+        worker_data['s1'].append(last_state.clone())
+>>>>>>> 05be04cb61c64d747b7e22ff92fea9278ed41a6c
         requester_data['s2'].append(state)
         worker_data['s2'].append(action)
 
@@ -113,7 +125,10 @@ def get_features(data: OurData, print_size=False):
 
     requester_data['s1'] = torch.stack(requester_data['s1'], dim=0)
     requester_data['s2'] = torch.stack(requester_data['s2'], dim=0)
+<<<<<<< HEAD
     requester_data['a'] = torch.stack(requester_data['a'], dim=0)
+=======
+>>>>>>> 05be04cb61c64d747b7e22ff92fea9278ed41a6c
     worker_data['s1'] = torch.stack(worker_data['s1'], dim=0)
     worker_data['s2'] = torch.stack(worker_data['s2'], dim=0)
     worker_data['a'] = torch.stack(worker_data['a'], dim=0)
