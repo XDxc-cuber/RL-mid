@@ -2,31 +2,32 @@ import torch
 import torch.nn as nn
 from load_datas import OurData, Dataloader
 
-"""
-注意：所有dict的key都是str
+device = "cuda:2"
 
-workers: {key: worker_id, value: "worker_quality"}
+# def de_dim(train_r_data, train_w_data, valid_r_data, valid_w_data, test_r_data, test_w_data):
+#     S = torch.cat([train_r_data['s2'], valid_r_data['s2'], test_r_data['s2']], dim=0)
+#     print(S.size())
+#     for i in range(S.size(1)):
+#         S[:,i] = (S[:,i] - S[:,i].min()) / S[:,i].max()
+    
+#     n = S.size(0)
+#     S_centered = S - torch.mean(S, dim=0)
+#     del train_r_data, train_w_data, valid_r_data, valid_w_data, test_r_data, test_w_data
+#     del S
 
-projects: key为project_id，value为：
-    * sub_category：项目子类别 (0到N的int)
-    * category：项目大类 (0到N的int)
-    * entry_count：项目entry的数目，相当于子任务 (int)
-    * entry_ids：每个entry的id (int)
-    * client_feedback：请求者的反馈分数 (float)
-    * average_score：所有entry的平均分 (float)
-    * total_awards：项目给出的报酬 (float)
-    * start_date：开始时间 (int)
-    * deadline：结束时间 (int)
+#     S_centered = S_centered.to(device)
+#     cov_matrix = torch.mm(S_centered.t(), S_centered) / (n - 1)
+#     e_values, e_vectors = torch.linalg.eigh(cov_matrix)
 
-entrys: 按照时间戳排序的dict，key为e_id，value：
-    * entry_id: entry的id (int)
-    * project_id：所属的project id (int)
-    * worker_id：完成这个任务的worker的id (int)
-    * score：完成这个任务的worker得到的分数 (int)
-    * entry_created_at：entry时间戳 (int)
-    * withdrawn：是否拒绝 (int, 0和1)
-    """
-def get_features(data: OurData):
+#     sorted_indices = torch.argsort(e_values, descending=True)
+#     e_vectors = e_vectors[:, sorted_indices]
+
+#     p_comp = e_vectors[:, :128]
+#     S_reduced = torch.mm(S_centered, p_comp)
+#     print(S_reduced.size())
+#     torch.save(S_reduced, "low_dim_state.pt")
+
+def get_features(data: OurData, print_size=False):
     """
     train/valid/test:
         _r_data:
@@ -47,60 +48,82 @@ def get_features(data: OurData):
     ws, ps, es = data.workers, data.projects, data.entrys
     requester_data, worker_data = {"s1": [], "a": [], "r": [], "s2": []}, {"s1": [], "a": [], "r": [], "s2": []}
 
-    w_num = len(ws)
+    wws = {}
+    for k, v in ws.items():
+        if v != -1:
+            wws[int(k)] = v
+
+    w_num = len(wws)
+    p_num = len(ps)
     e_num = len(es)
-    w_id2index, w_index2id = {}, list(ws.keys())
+    w_id2index, w_index2id = {}, list(wws.keys())
     for idx, _id in enumerate(w_index2id):
         w_id2index[_id] = idx
+    p_id2index, p_index2id = {}, list(ps.keys())
+    for idx, _id in enumerate(p_index2id):
+        p_id2index[_id] = idx
     
     # workers能力：[0, 1]
     category_size = 7
     sub_category_size = 29
     history_dim = w_num * category_size
-    workers_quality = (torch.tensor([ws[w_index2id[i]] for i in range(w_num)]) + 1 ) / 101
-    workers_history = [0. for i in range(history_dim)]
-    workers_history_count = [-1 for i in range(history_dim)]
+    p_dim = 3 * 661
+    # workers_quality = (torch.tensor([wws[w_index2id[i]] for i in range(w_num)])) / 100
+    workers_history = [[0. for i in range(category_size)] for j in range(w_num)]
+    workers_history_count = [[-1. for i in range(category_size)] for j in range(w_num)]
+    # quality score withdrawn
+    p_history = [[0. for i in range(p_dim)] for j in range(p_num)]
     
-    # last_state = None
+    last_r_state, last_w_state = None, None
     for k, e in enumerate(es):
-        print("%d / %d"%(k, e_num), end='\r')
-        w_id = str(e["worker_id"])
+        print(" %d / %d"%(k, e_num), end='\r')
+        w_id = e["worker_id"]
+        p_id = e['project_id']
         if not w_id in w_id2index:
             continue
-        state, action, reward = [], w_id2index[w_id], e["withdrawn"] * e['score']
-        p = ps[str(e['project_id'])]
+        state, action, reward = torch.tensor(p_history[p_id2index[str(p_id)]], dtype=torch.float16), torch.tensor([wws[w_id]], dtype=torch.float16), e["withdrawn"] * e['score']
+        p = ps[str(p_id)]
 
-         # 更新worker history
-        updated_index = int(action * category_size + p['category'])
-        workers_history[updated_index] += reward
-        workers_history_count[updated_index] += 1 if workers_history_count[updated_index] != -1 else 2
-        
-        # 得到s2状态
-        state.append(workers_quality.clone())
-        state.append(torch.tensor(workers_history) / torch.tensor(workers_history_count))
-        state.append(torch.tensor([p['category'], p['sub_category']]))
-        state = torch.cat(state, 0).type_as(torch.zeros(1, dtype=torch.float16))
+        action = torch.cat((action, torch.tensor(workers_history[w_id2index[w_id]], dtype=torch.float16) / \
+                            torch.tensor(workers_history_count[w_id2index[w_id]], dtype=torch.float16)), dim=0)
+
+        # 更新worker history
+        workers_history[w_id2index[w_id]][p['category']] += reward
+        workers_history_count[w_id2index[w_id]][p['category']] += 1 if workers_history_count[w_id2index[w_id]] != -1 else 2
         
         # s1状态就是上一个s2状态
-        # if last_state is None:
-        #     last_state = state
-        #     continue
-        # requester_data['s1'].append(last_state)
-        # worker_data['s1'].append(last_state.clone())
+        if last_r_state is None:
+            last_r_state = state
+            last_w_state = action
+            continue
+
+        requester_data['s1'].append(last_r_state)
+        worker_data['s1'].append(last_w_state)
         requester_data['s2'].append(state)
-        worker_data['s2'].append(state.clone())
-        last_state = state.clone()
-        requester_data['a'].append(action)
+        worker_data['s2'].append(action)
+
+        last_r_state = state.clone()
+        last_w_state = action.clone()
+
+        requester_data['a'].append(action.clone())
         requester_data['r'].append(reward)
 
-        worker_data['a'].append(e["withdrawn"])
+        worker_data['a'].append(state.clone())
         worker_data['r'].append(e["withdrawn"] * p['total_awards'] / p['entry_count'])
 
-    # requester_data['s1'] = torch.stack(requester_data['s1'], dim=0)
+    requester_data['s1'] = torch.stack(requester_data['s1'], dim=0)
     requester_data['s2'] = torch.stack(requester_data['s2'], dim=0)
-    # worker_data['s1'] = torch.stack(worker_data['s1'], dim=0)
+    requester_data['a'] = torch.stack(requester_data['a'], dim=0)
+    worker_data['s1'] = torch.stack(worker_data['s1'], dim=0)
     worker_data['s2'] = torch.stack(worker_data['s2'], dim=0)
+    worker_data['a'] = torch.stack(worker_data['a'], dim=0)
     print()
+
+    if print_size:
+        for k in ['s1', 's2', 'a']:
+            print(("requester %s size: "%k) + str(requester_data[k].size()))
+            print(("worker %s size: "%k) + str(worker_data[k].size()))
+
 
     return requester_data, worker_data
        
@@ -111,12 +134,11 @@ if __name__ == "__main__":
     train_data, valid_data, test_data = dataloader.get_datas()
 
 
-    train_r_data, train_w_data = get_features(train_data)
+    train_r_data, train_w_data = get_features(train_data, print_size=True)
     valid_r_data, valid_w_data = get_features(valid_data)
     test_r_data, test_w_data = get_features(test_data)
 
-
-
+    # de_dim(train_r_data, train_w_data, valid_r_data, valid_w_data, test_r_data, test_w_data)
 
 
 
