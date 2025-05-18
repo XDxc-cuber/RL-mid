@@ -35,10 +35,10 @@ class ReplayBuffer:
         return len(self.buffer)
 
 class DQNAgent:
-    def __init__(self, state_dim, hidden_dim=128, learning_rate=0.001, gamma=0.99, epsilon=1.0, epsilon_min=0.01, epsilon_decay=0.995):
+    def __init__(self, state_dim, action_dim. hidden_dim=128, learning_rate=0.001, gamma=0.99, epsilon=1.0, epsilon_min=0.01, epsilon_decay=0.995):
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.state_dim = state_dim
-        self.action_dim = 2  # 0: 拒绝, 1: 接受
+        self.action_dim = action_dim  # 0: 拒绝, 1: 接受
         
         self.policy_net = DQN(state_dim, hidden_dim, self.action_dim).to(self.device)
         self.target_net = DQN(state_dim, hidden_dim, self.action_dim).to(self.device)
@@ -111,7 +111,8 @@ class DQNAgent:
 
 def train_worker_dqn(worker_data, valid_data=None, num_episodes=1000, batch_size=64, target_update=10, log_interval=1000, eval_interval=5):
     state_dim = worker_data['s2'][0].shape[0]
-    agent = DQNAgent(state_dim)
+    action_dim = worker_data['a'][0].shape[0]
+    agent = DQNAgent(state_dim, action_dim)
     
     # 初始化wandb
     wandb.init(
@@ -141,7 +142,7 @@ def train_worker_dqn(worker_data, valid_data=None, num_episodes=1000, batch_size
         
         for i in tqdm(range(len(worker_data['s2']))):
             state = worker_data['s2'][i].numpy()
-            action = agent.select_action(state)
+            action = worker_data['a'][i]
             reward = worker_data['r'][i]
             
             if i < len(worker_data['s2']) - 1:
