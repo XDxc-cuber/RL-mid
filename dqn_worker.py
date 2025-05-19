@@ -6,6 +6,8 @@ from collections import deque
 import random
 from tqdm import tqdm
 import wandb
+action_dim = 1653
+
 
 class DQN(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
@@ -17,16 +19,21 @@ class DQN(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, output_dim)
         )
-    
-    def forward(self, x):
+    # method 1: 3600->1800
+    def forward(self, x):        
         return self.network(x)
+    # method 2  1800*d
+    # def forward(self, x):
+    #     self.dqn_x = self.network(x)
+        
+    #     return self.network(x)
 
 class ReplayBuffer:
     def __init__(self, capacity):
         self.buffer = deque(maxlen=capacity)
     
-    def push(self, state, action, reward, next_state):
-        self.buffer.append((state, action, reward, next_state))
+    def push(self, state, action, reward, next_state, a_emb, next_a_embed):
+        self.buffer.append((state, action, reward, next_state,  a_emb, next_a_embed))
     
     def sample(self, batch_size):
         return random.sample(self.buffer, batch_size)
@@ -35,26 +42,28 @@ class ReplayBuffer:
         return len(self.buffer)
 
 class DQNAgent:
-    def __init__(self, state_dim, action_dim. hidden_dim=128, learning_rate=0.001, gamma=0.99, epsilon=1.0, epsilon_min=0.01, epsilon_decay=0.995):
+    def __init__(self, state_dim, action_dim, hidden_dim=128, learning_rate=0.001, gamma=0.99, epsilon=1.0, epsilon_min=0.01, epsilon_decay=0.995):
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        self.state_dim = state_dim
-        self.action_dim = action_dim  # 0: 拒绝, 1: 接受
+        self.state_dim = state_dim + 2*1653 # method 1, 2*worker_num denotes action_emb dim
         
-        self.policy_net = DQN(state_dim, hidden_dim, self.action_dim).to(self.device)
-        self.target_net = DQN(state_dim, hidden_dim, self.action_dim).to(self.device)
+        self.action_dim = action_dim 
+        
+        self.policy_net = DQN(self.state_dim, hidden_dim, self.action_dim).to(self.device)
+        self.target_net = DQN(self.state_dim, hidden_dim, self.action_dim).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=learning_rate)
-        self.memory = ReplayBuffer(10000)
+        self.memory = ReplayBuffer(10000)   # remove, worrying about some data don't be sampled.
         
         self.gamma = gamma
         self.epsilon = epsilon
         self.epsilon_min = epsilon_min
         self.epsilon_decay = epsilon_decay
         
-    def select_action(self, state):
+    def select_action(self, state): # TODO
         if random.random() < self.epsilon:
-            return random.randint(0, 1)
+            return random.randrange(self.action_dim)
+
         
         with torch.no_grad():
             state = torch.FloatTensor(state).unsqueeze(0).to(self.device)
@@ -70,10 +79,26 @@ class DQNAgent:
         action_batch = torch.LongTensor(np.array([x[1] for x in batch])).to(self.device)
         reward_batch = torch.FloatTensor(np.array([x[2] for x in batch])).to(self.device)
         next_state_batch = torch.FloatTensor(np.array([x[3] for x in batch])).to(self.device)
+        a_emb_batch = torch.FloatTensor(np.array([x[4] for x in batch])).to(self.device)
+        next_a_emb_batch = torch.FloatTensor(np.array([x[5] for x in batch])).to(self.device)  # TODO:得加，batch中的尾巴取不到
         
-        current_q_values = self.policy_net(state_batch).gather(1, action_batch.unsqueeze(1))
-        next_q_values = self.target_net(next_state_batch).max(1)[0].detach()
-        expected_q_values = reward_batch + self.gamma * next_q_values
+        if torch.isnan(state_batch).any() or torch.isinf(state_batch).any():
+            print("警告: state_batch包含NaN或Inf值")
+            # 可以选择记录或调试这些值
+        # print("NaN索引:", torch.nonzero(torch.isnan(state_batch)))
+        
+        current_q_values = self.policy_net(torch.cat((state_batch, a_emb_batch), dim=1)).gather(1, action_batch.unsqueeze(1))
+        
+        
+        
+        is_terminal = (state_batch.sum(dim=1) == 0).float()  # 根据实际终止条件调整
+           # 确保is_terminal不包含非法值
+        if torch.isnan(is_terminal).any() or torch.isinf(is_terminal).any():
+            print("警告: is_terminal包含NaN或Inf值")
+            
+            
+        next_q_values = self.target_net(torch.cat((next_state_batch, next_a_emb_batch), dim=1)).max(1)[0].detach()   # TODO:why is [0]?             
+        expected_q_values = reward_batch + self.gamma * next_q_values * (1 - is_terminal)
         
         loss = nn.MSELoss()(current_q_values.squeeze(), expected_q_values)
         
@@ -100,9 +125,10 @@ class DQNAgent:
         self.policy_net.eval()  # 设置为评估模式
         
         with torch.no_grad():
-            for i in range(len(valid_data['s2'])):
-                state = valid_data['s2'][i].numpy()
+            for i in range(len(valid_data['s2'])):  # TODO: need to convert to batch
+                state = valid_data['s1'][i].numpy()
                 action = self.select_action(state)
+                
                 reward = valid_data['r'][i]
                 total_reward += reward
         
@@ -111,7 +137,7 @@ class DQNAgent:
 
 def train_worker_dqn(worker_data, valid_data=None, num_episodes=1000, batch_size=64, target_update=10, log_interval=1000, eval_interval=5):
     state_dim = worker_data['s2'][0].shape[0]
-    action_dim = worker_data['a'][0].shape[0]
+    action_dim = 1653 # 
     agent = DQNAgent(state_dim, action_dim)
     
     # 初始化wandb
@@ -134,23 +160,29 @@ def train_worker_dqn(worker_data, valid_data=None, num_episodes=1000, batch_size
     global_step = 0
     best_valid_reward = float('-inf')
     
+    state = worker_data['s1'].numpy()
+    action = worker_data['a'].numpy()  #TODO: convert to tensor
+    reward = worker_data['r']
+    next_state = worker_data['s2'].numpy()
+    a_emb = worker_data['a_space_emb'].numpy()    
+    next_a_emb = a_emb.copy()
+    n = a_emb.shape[2]
+    next_a_emb[:, :, :n-1] = a_emb[:, :, 1:n]
+    next_a_emb[:, :, n-1] = 0
+    
+    a_emb = transform_a_emb(state, a_emb)
+    next_a_emb = transform_a_emb(state, next_a_emb)
+    
+    assert a_emb.ndim == 2
+    assert state.ndim == 2
     for episode in range(num_episodes):
         print(f"Episode {episode} of {num_episodes}")
         total_reward = 0
         total_loss = 0
         train_steps = 0
         
-        for i in tqdm(range(len(worker_data['s2']))):
-            state = worker_data['s2'][i].numpy()
-            action = worker_data['a'][i]
-            reward = worker_data['r'][i]
-            
-            if i < len(worker_data['s2']) - 1:
-                next_state = worker_data['s2'][i + 1].numpy()
-            else:
-                next_state = state
-            
-            agent.memory.push(state, action, reward, next_state)
+        for i in tqdm(range(len(worker_data['s2']))):                  
+            agent.memory.push(state[i], action[i], reward[i], next_state[i], a_emb[i], next_a_emb[i])  
             
             # 训练并获取loss
             if len(agent.memory) >= batch_size:
@@ -178,7 +210,7 @@ def train_worker_dqn(worker_data, valid_data=None, num_episodes=1000, batch_size
                         total_reward = 0
                         train_steps = 0
             
-            total_reward += reward
+            total_reward += reward[i]
         
         if episode % target_update == 0:
             agent.update_target_network()
@@ -207,3 +239,25 @@ def train_worker_dqn(worker_data, valid_data=None, num_episodes=1000, batch_size
     
     wandb.finish()
     return agent 
+
+
+def transform_a_emb(state, a_emb):
+    
+    onehot_indices = state[:, :7].argmax(axis=1) # 7 denotes number of category
+    # valid_mask = (state[:, :7].sum(axis=1) > 0)
+    # onehot_indices = np.where(valid_mask, onehot_indices, np.zeros_like(onehot_indices))
+    # 提取第一个元素和one-hot对应元素
+    entry_num, m, n = a_emb.shape
+    first_elements = a_emb[:, :, 0]  # [batch_size, m]
+    # 使用向量化方式提取one-hot对应元素
+    batch_indices = np.arange(entry_num).reshape(-1, 1)
+    onehot_elements = a_emb[batch_indices, np.arange(m), 1+onehot_indices[:, np.newaxis]]
+    # 合并特征：将[m, 2]展平为[m*2]
+    a_emb = np.hstack([first_elements, onehot_elements])  # [batch_size, m*2]
+    # print(1+onehot_indices[:, np.newaxis])
+    return a_emb
+
+
+if __name__ == "__main__":
+    a = transform_a_emb(np.zeros((5,9)), np.zeros((5,6,8)))
+    print(a)
