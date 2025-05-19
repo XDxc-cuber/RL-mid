@@ -30,13 +30,14 @@ class DQN(nn.Module):
 
 class ReplayBuffer:
     def __init__(self, capacity):
-        self.buffer = deque(maxlen=capacity)
+        # self.buffer = deque(maxlen=capacity)
+        self.buffer = []
     
     def push(self, state, action, reward, next_state, a_emb, next_a_embed):
         self.buffer.append((state, action, reward, next_state,  a_emb, next_a_embed))
     
     def sample(self, batch_size):
-        return random.sample(self.buffer, batch_size)
+        return random.sample(self.buffer, batch_size // 2) + self.buffer[-batch_size // 2:]
     
     def __len__(self):
         return len(self.buffer)
