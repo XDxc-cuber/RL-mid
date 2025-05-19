@@ -30,13 +30,14 @@ class DQN(nn.Module):
 
 class ReplayBuffer:
     def __init__(self, capacity):
-        self.buffer = deque(maxlen=capacity)
+        # self.buffer = deque(maxlen=capacity)
+        self.buffer = []
     
     def push(self, state, action, reward, next_state, a_emb, next_a_embed):
         self.buffer.append((state, action, reward, next_state,  a_emb, next_a_embed))
     
     def sample(self, batch_size):
-        return random.sample(self.buffer, batch_size)
+        return random.sample(self.buffer, batch_size // 2) + self.buffer[-batch_size // 2:]
     
     def __len__(self):
         return len(self.buffer)
@@ -212,6 +213,9 @@ def train_worker_dqn(worker_data, valid_data=None, num_episodes=1000, batch_size
         total_reward = 0
         total_loss = 0
         train_steps = 0
+
+        update_count = 0
+
         
         for i in tqdm(range(len(worker_data['s2']))):                  
             agent.memory.push(state[i], action[i], reward[i], next_state[i], a_emb[i], next_a_emb[i])  
@@ -246,9 +250,15 @@ def train_worker_dqn(worker_data, valid_data=None, num_episodes=1000, batch_size
                         total_reward = 0
                         train_steps = 0
             
-            
-        if episode % target_update == 0:
-            agent.update_target_network()
+            total_reward += reward[i]
+
+            update_count += 1
+            if update_count == target_update:
+                agent.update_target_network()
+                update_count = 0
+        
+        # if episode % target_update == 0:
+        #     agent.update_target_network()
         
         # 每个episode结束时打印一次
         # avg_reward = total_reward / len(worker_data['s2'])
