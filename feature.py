@@ -119,6 +119,13 @@ def get_features(data: OurData, print_size=False):
         # TODO: why else 2?
         workers_history_count[w_id2index[w_id]][p['category']] += 1 if workers_history_count[w_id2index[w_id]][p['category']] != -1 else 2
 
+        # Debug prints
+        # print("Current worker:", w_id)
+        # print("Category:", p['category'])
+        # print("Reward:", reward)
+        # print("History before update:", workers_history[w_id2index[w_id]][p['category']])
+        # print("History count before update:", workers_history_count[w_id2index[w_id]][p['category']])
+
         # 更新p history
         idx = p_history_count[p_id2index[str(p_id)]] * 2
 
@@ -146,16 +153,16 @@ def get_features(data: OurData, print_size=False):
             torch.tensor(workers_history_count[w_idx], dtype=torch.float16)
         updated_history_emb = torch.cat([torch.tensor([wws[w_id]], dtype=torch.float16), updated_history], dim=0)
         a_space_emb.index_copy_(0, torch.tensor([w_idx]), updated_history_emb.unsqueeze(0))
-
+        
         worker_data['r'].append(e["withdrawn"] * p['total_awards'] / p['entry_count'])
-
+    print("a_space_emb size: ", a_space_emb.size())
     s2 = requester_data['s1'][1:]
     requester_data['s1'] = torch.stack(requester_data['s1'], dim=0)
     s2.append(torch.zeros(requester_data['s1'][0].size(), dtype=torch.float16))
     requester_data['s2'] = torch.stack(s2, dim=0)
     requester_data['a'] = torch.tensor(requester_data['a'], dtype=torch.float16)
     requester_data['a_space_emb'] = torch.stack(requester_data['a_space_emb'], dim=0)
-    print("final a_space_emb size: ", requester_data['a_space_emb'].size())
+    
     # worker_data['s1'] = torch.stack(worker_data['s1'], dim=0)
     # worker_data['s2'] = torch.stack(worker_data['s2'], dim=0)
     # worker_data['a'] = torch.stack(worker_data['a'], dim=0)
@@ -164,7 +171,7 @@ def get_features(data: OurData, print_size=False):
     requester_data['s2'] = (requester_data['s2'] - requester_data['s2'].mean(dim=0)) / (requester_data['s2'].std(dim=0) + 1e-6)
 
     requester_data['a_space_emb'] = (requester_data['a_space_emb'] - requester_data['a_space_emb'].mean(dim=1, keepdim=True)) / (requester_data['a_space_emb'].std(dim=1, keepdim=True) + 1e-6)
-
+    print("final a_space_emb size: ", requester_data['a_space_emb'].size())
     if print_size:
         for k in ['s1', 's2', 'a']:
             print(("requester %s size: "%k) + str(requester_data[k].size()))
@@ -180,9 +187,19 @@ if __name__ == "__main__":
     train_data, valid_data, test_data = dataloader.get_datas()
 
 
-    # train_r_data, train_w_data = get_features(train_data, print_size=True)
-    # valid_r_data, valid_w_data = get_features(valid_data)
-    test_r_data, test_w_data = get_features(test_data, print_size=True)
+    train_r_data, train_w_data = get_features(train_data, print_size=True)
+    sum = 0
+    for i in range(1, len(train_r_data['a_space_emb'])-1):
+        diff = train_r_data['a_space_emb'][i] - train_r_data["a_space_emb"][i+1]
+        sum = torch.sum(diff != 0)
+        if sum != 0:
+            print("Number of non-zero elements:", sum)
+            print("difference place: ", i)
+            break
+    if sum == 0:
+        print("No non-zero difference found")
+    valid_r_data, valid_w_data = get_features(valid_data)
+    test_r_data, test_w_data = get_features(test_data)
 
     # de_dim(train_r_data, train_w_data, valid_r_data, valid_w_data, test_r_data, test_w_data)
 
