@@ -8,6 +8,8 @@ from tqdm import tqdm
 import wandb
 action_dim = 1653
 
+device = "cuda:0"
+
 
 class DQN(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
@@ -37,15 +39,16 @@ class ReplayBuffer:
         self.buffer.append((state, action, reward, next_state,  a_emb, next_a_embed))
     
     def sample(self, batch_size):
-        return random.sample(self.buffer, batch_size // 2) + self.buffer[-batch_size // 2:]
+        b_size = int(batch_size / 3 * 2)
+        return random.sample(self.buffer[:-b_size], batch_size - b_size) + self.buffer[-b_size:]
     
     def __len__(self):
         return len(self.buffer)
 
 class DQNAgent:
-    def __init__(self, state_dim, action_dim, hidden_dim=128, learning_rate=0.001, gamma=0.99, epsilon=1.0, epsilon_min=0.01, epsilon_decay=0.995):
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        self.state_dim = state_dim + 2*1653 # method 1, 2*worker_num denotes action_emb dim
+    def __init__(self, state_dim, action_dim, hidden_dim=128, learning_rate=0.001, gamma=0.99, epsilon=1.0, epsilon_min=0.01, epsilon_decay=0.999):
+        self.device = device#torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.state_dim = 256 # method 1, 2*worker_num denotes action_emb dim
         
         self.action_dim = action_dim 
         
@@ -77,19 +80,19 @@ class DQNAgent:
             return
         
         batch = self.memory.sample(batch_size)
-        state_batch = torch.FloatTensor(np.array([x[0] for x in batch])).to(self.device)
-        action_batch = torch.LongTensor(np.array([x[1] for x in batch])).to(self.device)
-        reward_batch = torch.FloatTensor(np.array([x[2] for x in batch])).to(self.device)
-        next_state_batch = torch.FloatTensor(np.array([x[3] for x in batch])).to(self.device)
-        a_emb_batch = torch.FloatTensor(np.array([x[4] for x in batch])).to(self.device)
-        next_a_emb_batch = torch.FloatTensor(np.array([x[5] for x in batch])).to(self.device)  # TODO:得加，batch中的尾巴取不到
+        state_batch = torch.cat([x[0].view(1, -1) for x in batch], dim=0).to(self.device)
+        action_batch = torch.cat([x[1].view(1, -1) for x in batch], dim=0).long().to(self.device)
+        reward_batch = torch.cat([x[2].view(1, -1) for x in batch], dim=0).to(self.device)
+        next_state_batch = torch.cat([x[3].view(1, -1) for x in batch], dim=0).to(self.device)
+        a_emb_batch = torch.cat([x[4].view(1, -1) for x in batch], dim=0).to(self.device)
+        next_a_emb_batch = torch.cat([x[5].view(1, -1) for x in batch], dim=0).to(self.device)  # TODO:得加，batch中的尾巴取不到
         
         if torch.isnan(state_batch).any() or torch.isinf(state_batch).any():
             print("警告: state_batch包含NaN或Inf值")
             # 可以选择记录或调试这些值
         # print("NaN索引:", torch.nonzero(torch.isnan(state_batch)))
         current_q_values_distribution = self.policy_net(torch.cat((state_batch, a_emb_batch), dim=1))
-        current_q_values = current_q_values_distribution.gather(1, action_batch.unsqueeze(1))
+        current_q_values = current_q_values_distribution.gather(1, action_batch)
         # 计算训练集奖励
         # print(current_q_values.size())
         action_probs = torch.softmax(current_q_values_distribution, dim=1)  # 对第二维应用Softmax，得到概率分布
@@ -132,43 +135,105 @@ class DQNAgent:
         self.target_net.load_state_dict(self.policy_net.state_dict())
     
     
-    def evaluate(self, valid_data, batch_size):
+    def evaluate(self, valid_features, batch_size):
         """在验证集上批量评估模型，使用动作概率分布计算加权奖励"""
         self.policy_net.eval()  # 设置为评估模式
         total_weighted_reward = 0.0
+
+        state, action, reward, next_state, a_emb, next_a_emb = valid_features
         
         # 提取验证数据并转换为张量
-        state = torch.FloatTensor(valid_data['s1'].numpy()).to(self.device)
+        state = state.to(self.device)
         # entry_num = state.shape[0]
-        action = torch.LongTensor(valid_data['a'].numpy()).to(self.device)  # 真实动作标签（用于索引概率）
-        a_emb = torch.FloatTensor(valid_data['a_emb'].numpy()).to(self.device)
-        reward = torch.FloatTensor(valid_data['r'].numpy()).to(self.device)
-        for start_idx in range(0, len(state[0]), batch_size):
+        action = action.long().to(self.device)  # 真实动作标签（用于索引概率）
+        a_emb = a_emb.to(self.device)
+        reward = reward.to(self.device)
+        for start_idx in range(0, state.size(0), batch_size):
             
-            end_idx = min(start_idx + batch_size, len(state[0]))
+            end_idx = min(start_idx + batch_size, state.size(0))
             batch_data = {
                 's1': state[start_idx:end_idx],
                 'a': action[start_idx:end_idx],
                 'r': reward[start_idx:end_idx],
                 'a_emb': a_emb[start_idx:end_idx]
             }
-        with torch.no_grad():
-            # 批量计算Q值和动作概率分布
-            q_values = self.policy_net(batch_data['s1'])  # 形状: [batch_size, action_dim]
-            action_probs = torch.softmax(q_values, dim=1)  # 对第二维应用Softmax，得到概率分布
-            
-            # 提取每个样本对应真实动作的概率，并与奖励相乘
-            batch_indices = torch.arange(batch_data['s'].shape(0))
-            selected_probs = action_probs[batch_indices, batch_data['a']]  # 形状: [batch_size]
-            weighted_reward = selected_probs * batch_data['r']  # 概率加权奖励
-            
-            total_weighted_reward = weighted_reward.sum().item()
+            with torch.no_grad():
+                # 批量计算Q值和动作概率分布
+                q_values = self.policy_net(torch.cat((batch_data['s1'], batch_data['a_emb']), dim=1))  # 形状: [batch_size, action_dim]
+                action_probs = torch.softmax(q_values, dim=1)  # 对第二维应用Softmax，得到概率分布
+                
+                # 提取每个样本对应真实动作的概率，并与奖励相乘
+                batch_indices = torch.arange(batch_data['s1'].size(0))
+                selected_probs = action_probs[batch_indices, batch_data['a']]  # 形状: [batch_size]
+                weighted_reward = selected_probs * batch_data['r']  # 概率加权奖励
+                
+                total_weighted_reward += weighted_reward.sum().item()
         
         self.policy_net.train()  # 恢复训练模式
-        avg_weighted_reward = total_weighted_reward / len(valid_data['s2'])
+        avg_weighted_reward = total_weighted_reward# / state.size(0)
         return avg_weighted_reward
 
-def train_worker_dqn(worker_data, valid_data=None, num_episodes=1000, batch_size=64, target_update=10, log_interval=1000, eval_interval=5):
+
+def de_dim(x1, x2, dim=128):
+    n1, n2 = x1.size(0), x2.size(0)
+    n = n1 + n2
+    x = torch.cat((x1, x2), dim=0)
+    x_centered = x - torch.mean(x, dim=0)
+    x_centered = x_centered.float().to(device)
+
+    # S_centered = S_centered.to(device)
+    cov_matrix = torch.mm(x_centered.t(), x_centered) / (n - 1)
+    e_values, e_vectors = torch.linalg.eigh(cov_matrix)
+
+    sorted_indices = torch.argsort(e_values, descending=True)
+    e_vectors = e_vectors[:, sorted_indices]
+
+    p_comp = e_vectors[:, :dim]
+    x_reduced = torch.mm(x_centered, p_comp).to("cpu")
+
+    x_reduced = (x_reduced - x_reduced.mean(dim=0)) / x_reduced.std(dim=0)
+    
+    return x_reduced[:n1], x_reduced[n1:]
+
+def get_data(worker_data, v_data):
+    # 写的丑就丑点吧。。
+    state = worker_data['s1']
+    action = worker_data['a']
+    reward = torch.tensor(worker_data['r'])
+    next_state = worker_data['s2']
+    a_emb = worker_data['a_space_emb']   
+    next_a_emb = a_emb.clone()
+    n = a_emb.size(2)
+    next_a_emb[:, :, :n-1] = a_emb[:, :, 1:n]
+    next_a_emb[:, :, n-1] = 0
+    a_emb = torch.tensor(transform_a_emb(state, a_emb))
+    next_a_emb = torch.tensor(transform_a_emb(next_state, next_a_emb))
+
+    vstate = v_data['s1']
+    vaction = v_data['a']
+    vreward = torch.tensor(v_data['r'])
+    vnext_state = v_data['s2']
+    va_emb = v_data['a_space_emb']   
+    vnext_a_emb = va_emb.clone()
+    vn = va_emb.size(2)
+    vnext_a_emb[:, :, :vn-1] = va_emb[:, :, 1:vn]
+    vnext_a_emb[:, :, vn-1] = 0
+    va_emb = torch.tensor(transform_a_emb(vstate, va_emb))
+    vnext_a_emb = torch.tensor(transform_a_emb(vnext_state, vnext_a_emb))
+
+    state, vstate = de_dim(state, vstate)
+    next_state, vnext_state = de_dim(next_state, vnext_state)
+    a_emb, va_emb = de_dim(a_emb, va_emb)
+    next_a_emb, vnext_a_emb = de_dim(next_a_emb, vnext_a_emb)
+
+    reward = (reward - reward.min()) / reward.max()
+    vreward = (vreward - vreward.min()) / vreward.max()
+
+    return (state, action, reward, next_state, a_emb, next_a_emb), \
+        (vstate, vaction, vreward, vnext_state, va_emb, vnext_a_emb)
+
+
+def train_worker_dqn(worker_data, valid_data, num_episodes=1000, batch_size=64, target_update=10, log_interval=1000, eval_interval=5):
     state_dim = worker_data['s2'][0].shape[0]
     action_dim = 1653 # 
     agent = DQNAgent(state_dim, action_dim)
@@ -192,19 +257,10 @@ def train_worker_dqn(worker_data, valid_data=None, num_episodes=1000, batch_size
     
     global_step = 0
     best_valid_reward = float('-inf')
-    
-    state = worker_data['s1'].numpy()
-    action = worker_data['a'].numpy()  #TODO: convert to tensor
-    reward = worker_data['r']
-    next_state = worker_data['s2'].numpy()
-    a_emb = worker_data['a_space_emb'].numpy()    
-    next_a_emb = a_emb.copy()
-    n = a_emb.shape[2]
-    next_a_emb[:, :, :n-1] = a_emb[:, :, 1:n]
-    next_a_emb[:, :, n-1] = 0
-    
-    a_emb = transform_a_emb(state, a_emb)
-    next_a_emb = transform_a_emb(state, next_a_emb)
+
+    # 得到transform 和 pca 后的data
+    train_features, valid_features = get_data(worker_data, valid_data)
+    state, action, reward, next_state, a_emb, next_a_emb = train_features
     
     assert a_emb.ndim == 2
     assert state.ndim == 2
@@ -215,13 +271,16 @@ def train_worker_dqn(worker_data, valid_data=None, num_episodes=1000, batch_size
         train_steps = 0
 
         update_count = 0
+        batch_count = 0
 
         
         for i in tqdm(range(len(worker_data['s2']))):                  
             agent.memory.push(state[i], action[i], reward[i], next_state[i], a_emb[i], next_a_emb[i])  
+            batch_count += 1
             
             # 训练并获取loss
-            if len(agent.memory) >= batch_size:
+            if batch_count >= batch_size:
+                batch_count = 0
                 loss, reward_train = agent.train(batch_size)
                 if loss is not None:
                     total_loss += loss
@@ -232,9 +291,6 @@ def train_worker_dqn(worker_data, valid_data=None, num_episodes=1000, batch_size
                     # 每log_interval个batch记录一次
                     if global_step % log_interval == 0:
                         avg_loss = total_loss / train_steps if train_steps > 0 else 0
-                        
-                        
-                        
                         avg_reward = total_reward / train_steps if train_steps > 0 else 0
                         
                         wandb.log({
@@ -249,13 +305,12 @@ def train_worker_dqn(worker_data, valid_data=None, num_episodes=1000, batch_size
                         total_loss = 0
                         total_reward = 0
                         train_steps = 0
+                update_count += 1
+                if update_count == target_update:
+                    agent.update_target_network()
+                    update_count = 0
             
             total_reward += reward[i]
-
-            update_count += 1
-            if update_count == target_update:
-                agent.update_target_network()
-                update_count = 0
         
         # if episode % target_update == 0:
         #     agent.update_target_network()
@@ -267,7 +322,7 @@ def train_worker_dqn(worker_data, valid_data=None, num_episodes=1000, batch_size
         
         # 每eval_interval个episode验证一次
         if valid_data is not None and episode % eval_interval == 0:
-            valid_reward = agent.evaluate(valid_data, batch_size)
+            valid_reward = agent.evaluate(valid_features, batch_size)
             print(f"Validation at Episode {episode}, Avg Reward: {valid_reward:.4f}")
             
             # 记录验证结果
@@ -301,6 +356,7 @@ def transform_a_emb(state, a_emb):
     a_emb = np.hstack([first_elements, onehot_elements])  # [batch_size, m*2]
     # print(1+onehot_indices[:, np.newaxis])
     return a_emb
+
 
 
 if __name__ == "__main__":
