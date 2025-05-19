@@ -181,6 +181,9 @@ def train_worker_dqn(worker_data, valid_data=None, num_episodes=1000, batch_size
         total_reward = 0
         total_loss = 0
         train_steps = 0
+
+        update_count = 0
+
         
         for i in tqdm(range(len(worker_data['s2']))):                  
             agent.memory.push(state[i], action[i], reward[i], next_state[i], a_emb[i], next_a_emb[i])  
@@ -212,9 +215,14 @@ def train_worker_dqn(worker_data, valid_data=None, num_episodes=1000, batch_size
                         train_steps = 0
             
             total_reward += reward[i]
+
+            update_count += 1
+            if update_count == target_update:
+                agent.update_target_network()
+                update_count = 0
         
-        if episode % target_update == 0:
-            agent.update_target_network()
+        # if episode % target_update == 0:
+        #     agent.update_target_network()
         
         # 每个episode结束时打印一次
         avg_reward = total_reward / len(worker_data['s2'])
