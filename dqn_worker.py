@@ -61,14 +61,15 @@ class DQNAgent:
         self.epsilon_decay = epsilon_decay
         
     def select_action(self, state): # TODO
-        if random.random() < self.epsilon:
-            return random.randrange(self.action_dim)
+        # if random.random() < self.epsilon:   #TODO: use distribution
+        #     return random.randrange(self.action_dim)
 
         
         with torch.no_grad():
             state = torch.FloatTensor(state).unsqueeze(0).to(self.device)
             q_values = self.policy_net(state)
-            return q_values.argmax().item()
+            return nn.functional.softmax(q_values, dim=1)
+            # return q_values.argmax().item()
     
     def train(self, batch_size=64):
         if len(self.memory) < batch_size:
@@ -86,9 +87,19 @@ class DQNAgent:
             print("警告: state_batch包含NaN或Inf值")
             # 可以选择记录或调试这些值
         # print("NaN索引:", torch.nonzero(torch.isnan(state_batch)))
-        
-        current_q_values = self.policy_net(torch.cat((state_batch, a_emb_batch), dim=1)).gather(1, action_batch.unsqueeze(1))
-        
+        current_q_values_distribution = self.policy_net(torch.cat((state_batch, a_emb_batch), dim=1))
+        current_q_values = current_q_values_distribution.gather(1, action_batch.unsqueeze(1))
+        # 计算训练集奖励
+        # print(current_q_values.size())
+        action_probs = torch.softmax(current_q_values_distribution, dim=1)  # 对第二维应用Softmax，得到概率分布
+        # print(action_probs.size())
+        # 提取每个样本对应真实动作的概率，并与奖励相乘
+        batch_indices = torch.arange(batch_size)
+        selected_probs = action_probs[batch_indices, action_batch]  # 形状: [batch_size]
+        # assert selected_probs.size() == batch_size
+        # print(selected_probs, reward_batch)
+        weighted_reward = selected_probs * reward_batch  # 概率加权奖励
+        # print(weighted_reward)
         
         
         is_terminal = (state_batch.sum(dim=1) == 0).float()  # 根据实际终止条件调整
@@ -107,7 +118,7 @@ class DQNAgent:
         self.optimizer.step()
         
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
-        return loss.item()
+        return loss.item(), weighted_reward.sum().item()
     
     def update_target_network(self):
         self.target_net.load_state_dict(self.policy_net.state_dict())
@@ -118,22 +129,43 @@ class DQNAgent:
     def load_model(self, path):
         self.policy_net.load_state_dict(torch.load(path))
         self.target_net.load_state_dict(self.policy_net.state_dict())
-
-    def evaluate(self, valid_data):
-        """在验证集上评估模型"""
-        total_reward = 0
+    
+    
+    def evaluate(self, valid_data, batch_size):
+        """在验证集上批量评估模型，使用动作概率分布计算加权奖励"""
         self.policy_net.eval()  # 设置为评估模式
+        total_weighted_reward = 0.0
         
+        # 提取验证数据并转换为张量
+        state = torch.FloatTensor(valid_data['s1'].numpy()).to(self.device)
+        # entry_num = state.shape[0]
+        action = torch.LongTensor(valid_data['a'].numpy()).to(self.device)  # 真实动作标签（用于索引概率）
+        a_emb = torch.FloatTensor(valid_data['a_emb'].numpy()).to(self.device)
+        reward = torch.FloatTensor(valid_data['r'].numpy()).to(self.device)
+        for start_idx in range(0, len(state[0]), batch_size):
+            
+            end_idx = min(start_idx + batch_size, len(state[0]))
+            batch_data = {
+                's1': state[start_idx:end_idx],
+                'a': action[start_idx:end_idx],
+                'r': reward[start_idx:end_idx],
+                'a_emb': a_emb[start_idx:end_idx]
+            }
         with torch.no_grad():
-            for i in range(len(valid_data['s2'])):  # TODO: need to convert to batch
-                state = valid_data['s1'][i].numpy()
-                action = self.select_action(state)
-                
-                reward = valid_data['r'][i]
-                total_reward += reward
+            # 批量计算Q值和动作概率分布
+            q_values = self.policy_net(batch_data['s1'])  # 形状: [batch_size, action_dim]
+            action_probs = torch.softmax(q_values, dim=1)  # 对第二维应用Softmax，得到概率分布
+            
+            # 提取每个样本对应真实动作的概率，并与奖励相乘
+            batch_indices = torch.arange(batch_data['s'].shape(0))
+            selected_probs = action_probs[batch_indices, batch_data['a']]  # 形状: [batch_size]
+            weighted_reward = selected_probs * batch_data['r']  # 概率加权奖励
+            
+            total_weighted_reward = weighted_reward.sum().item()
         
         self.policy_net.train()  # 恢复训练模式
-        return total_reward / len(valid_data['s2'])
+        avg_weighted_reward = total_weighted_reward / len(valid_data['s2'])
+        return avg_weighted_reward
 
 def train_worker_dqn(worker_data, valid_data=None, num_episodes=1000, batch_size=64, target_update=10, log_interval=1000, eval_interval=5):
     state_dim = worker_data['s2'][0].shape[0]
@@ -186,16 +218,20 @@ def train_worker_dqn(worker_data, valid_data=None, num_episodes=1000, batch_size
             
             # 训练并获取loss
             if len(agent.memory) >= batch_size:
-                loss = agent.train(batch_size)
+                loss, reward_train = agent.train(batch_size)
                 if loss is not None:
                     total_loss += loss
+                    total_reward += reward_train
                     train_steps += 1
                     global_step += 1
                     
                     # 每log_interval个batch记录一次
                     if global_step % log_interval == 0:
                         avg_loss = total_loss / train_steps if train_steps > 0 else 0
-                        avg_reward = total_reward / (i + 1) if i > 0 else 0
+                        
+                        
+                        
+                        avg_reward = total_reward / train_steps if train_steps > 0 else 0
                         
                         wandb.log({
                             "global_step": global_step,
@@ -210,19 +246,18 @@ def train_worker_dqn(worker_data, valid_data=None, num_episodes=1000, batch_size
                         total_reward = 0
                         train_steps = 0
             
-            total_reward += reward[i]
-        
+            
         if episode % target_update == 0:
             agent.update_target_network()
         
         # 每个episode结束时打印一次
-        avg_reward = total_reward / len(worker_data['s2'])
-        avg_loss = total_loss / train_steps if train_steps > 0 else 0
-        print(f"Episode {episode}, Avg Reward: {avg_reward:.4f}, Avg Loss: {avg_loss:.4f}, Epsilon: {agent.epsilon:.2f}")
+        # avg_reward = total_reward / len(worker_data['s2'])
+        # avg_loss = total_loss / train_steps if train_steps > 0 else 0
+        # print(f"Episode {episode}, Avg Reward: {avg_reward:.4f}, Avg Loss: {avg_loss:.4f}, Epsilon: {agent.epsilon:.2f}")
         
         # 每eval_interval个episode验证一次
         if valid_data is not None and episode % eval_interval == 0:
-            valid_reward = agent.evaluate(valid_data)
+            valid_reward = agent.evaluate(valid_data, batch_size)
             print(f"Validation at Episode {episode}, Avg Reward: {valid_reward:.4f}")
             
             # 记录验证结果
